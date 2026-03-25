@@ -1,13 +1,9 @@
 import { useState, useCallback } from 'react';
-import { encodeDeployData, type Hash, type PublicClient } from 'viem';
-import { sendUserOperation, waitForUserOperationReceipt } from 'viem/account-abstraction';
-import { getAction } from 'viem/utils';
-import { useAccount, usePublicClient, useWalletClient } from 'wagmi';
+import { encodeDeployData, toHex } from 'viem';
+import { useAccount, usePublicClient } from 'wagmi';
 import { useWallets } from '@privy-io/react-auth';
-import { useZeroDevKernelClient } from '@/hooks/useZeroDevKernelClient';
 import {
   deployEVVMContracts,
-  ZERODEV_SPONSOR_CALLDATA_CHAR_LIMIT,
   type DeploymentConfig,
   type DeploymentProgress,
   type ContractAddresses,
@@ -19,71 +15,7 @@ import {
   type DeploymentRecord,
 } from '@/lib/storage';
 import { getChainName } from '@/lib/wagmi';
-
-/** ZeroDev paymaster validates callData as lowercase hex only; mixed case → "Not valid hex data". */
-function bundlerSafeHex(data: `0x${string}`): `0x${string}` {
-  return data.toLowerCase() as `0x${string}`;
-}
-
-/** After signing, confirm RPC sees the same initcode — Privy+wagmi CREATE can submit 0x00000600… instead of Solidity bytecode (Success + empty getCode). */
-async function verifyMempoolMatchesCreateData(
-  publicClient: PublicClient,
-  hash: Hash,
-  expectedData: `0x${string}`
-): Promise<void> {
-  const exp = expectedData.toLowerCase();
-  for (let i = 0; i < 80; i++) {
-    const tx = await publicClient.getTransaction({ hash });
-    if (tx?.input && tx.input.length > 64) {
-      const got = tx.input.toLowerCase();
-      if (got !== exp) {
-        // #region agent log
-        fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-          body: JSON.stringify({
-            sessionId: '7a9c6a',
-            runId: 'create-verify',
-            hypothesisId: 'H-calldata-mismatch',
-            location: 'useEVVMDeployment.ts:verifyMempoolMatchesCreateData',
-            message: 'on-chain tx.input !== requested Core initcode',
-            data: {
-              hash,
-              gotPrefix: got.slice(0, 48),
-              expPrefix: exp.slice(0, 48),
-              gotLen: got.length,
-              expLen: exp.length,
-            },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-        // #endregion
-        throw new Error(
-          'Your wallet did not submit the EVVM Core initcode (on-chain transaction data was replaced). ' +
-            'Fix: set VITE_LARGE_DEPLOY_SPONSOR_URL + VITE_LARGE_DEPLOY_SPONSOR_FROM and run `npm run dev:sponsor` so Core deploys from the platform treasury, or use an injected wallet (e.g. MetaMask) that supports raw contract creation.'
-        );
-      }
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-}
-
-/** EOA/Privy CREATE for EVVM Core (~38k init); wallet default ~1.2M leaves empty contract + status=1. */
-function sponsoredDeployCallGasLimit(deployParams: {
-  abi: unknown;
-  bytecode: `0x${string}`;
-  args: readonly unknown[];
-}): bigint {
-  const init = encodeDeployData(deployParams as Parameters<typeof encodeDeployData>[0]);
-  const byteLen = BigInt((init.length - 2) / 2);
-  const estimated = 1_200_000n + byteLen * 400n;
-  const minGas = 8_000_000n;
-  const maxGas = 14_000_000n;
-  if (estimated < minGas) return minGas;
-  if (estimated > maxGas) return maxGas;
-  return estimated;
-}
+import { tempoModerato } from 'viem/chains';
 
 /** EOA/Privy CREATE for EVVM Core (~38k init); wallet default ~1.2M leaves empty contract + status=1. */
 function walletLargeCreateGasLimit(deployParams: {
@@ -93,9 +25,9 @@ function walletLargeCreateGasLimit(deployParams: {
 }): bigint {
   const init = encodeDeployData(deployParams as Parameters<typeof encodeDeployData>[0]);
   const byteLen = BigInt((init.length - 2) / 2);
-  const estimated = 1_200_000n + byteLen * 450n;
-  const minGas = 8_000_000n;
-  const maxGas = 22_000_000n;
+  const estimated = 2_000_000n + byteLen * 650n;
+  const minGas = 10_000_000n;
+  const maxGas = 24_000_000n;
   if (estimated < minGas) return minGas;
   if (estimated > maxGas) return maxGas;
   return estimated;
@@ -108,20 +40,37 @@ export function useEVVMDeployment() {
   const { address, chain } = useAccount();
   const { wallets, ready: walletsReady } = useWallets();
   const publicClient = usePublicClient();
-  const { data: walletClient } = useWalletClient();
-  const { client: zerodevClient, account: zerodevAccount, isLoading: zerodevIsLoading } =
-    useZeroDevKernelClient();
 
-  // Use the connected wagmi account as the deploy sender, so the tx approval modal
-  // comes from the connected Tempo Wallet / OWS flow (not Privy's embedded wallet).
-  const deployerAddress = address as `0x${string}` | undefined;
+  const embeddedWallet =
+    wallets.find((w: any) => w?.chainType === 'ethereum' && w?.walletClientType === 'privy') ??
+    wallets.find((w: any) => w?.chainType === 'ethereum') ??
+    wallets[0];
+  const embeddedWalletAddress = embeddedWallet?.address;
+  const hasEmbeddedProvider = typeof embeddedWallet?.getEthereumProvider === 'function';
+  const useDirectTempoWalletFlow = chain?.id === tempoModerato.id;
 
-  const canDeploy = !!deployerAddress && walletsReady && !!publicClient && hasBytecodes() && !!walletClient;
+  const canDeploy =
+    !!address &&
+    walletsReady &&
+    !!embeddedWalletAddress &&
+    !!publicClient &&
+    hasBytecodes() &&
+    (useDirectTempoWalletFlow ? hasEmbeddedProvider : !!zerodevClient && !!zerodevAccount);
 
   const deploy = useCallback(
     async (config: DeploymentConfig): Promise<DeploymentRecord | null> => {
-      if (!publicClient || !chain || !walletsReady || !deployerAddress) {
+      if (!publicClient || !chain || !walletsReady || !embeddedWalletAddress) {
         setError('Wallet not connected');
+        return null;
+      }
+
+      if (useDirectTempoWalletFlow && !hasEmbeddedProvider) {
+        setError('Privy embedded wallet provider is not ready yet.');
+        return null;
+      }
+
+      if (!useDirectTempoWalletFlow) {
+        setError('Switch the Privy wallet to Tempo Testnet (Moderato) to deploy contracts.');
         return null;
       }
 
@@ -151,7 +100,6 @@ export function useEVVMDeployment() {
       saveDeployment(record);
 
       try {
-        // Deploy via the embedded wallet.
         const sendSponsoredTransaction = async (input: {
           chainId: number;
           to?: `0x${string}`;
@@ -161,41 +109,8 @@ export function useEVVMDeployment() {
           walletContractDeploy?: boolean;
         }) => {
           const isContractDeploy = input.to === undefined || input.to === null;
-          const useZeroDevForCall =
-            !isContractDeploy &&
-            !!zerodevClient &&
-            !!zerodevAccount &&
-            input.chainId === chain?.id;
-
-          const canZeroDevDeploy =
-            isContractDeploy &&
-            !!input.deployParams &&
-            !!zerodevClient &&
-            !!zerodevAccount &&
-            input.chainId === chain?.id;
-          const forceTempoWalletOnly = (import.meta.env.VITE_TEMPO_WALLET_ONLY ?? 'true') === 'true';
-          // #region agent log
-          fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-            body: JSON.stringify({
-              sessionId: '1c16cb',
-              runId: 'debug-branch-flags',
-              hypothesisId: 'H1-zerodev-vs-privy',
-              location: 'useEVVMDeployment.ts:sendSponsoredTransaction:branch-flags',
-              message: 'Branch flags (ZeroDev vs wallet)',
-              data: {
-                isContractDeploy,
-                useZeroDevForCall,
-                canZeroDevDeploy,
-                inputChainId: input.chainId,
-                currentChainId: chain?.id ?? null,
-                walletContractDeploy: input.walletContractDeploy ?? null,
-              },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-          // #endregion
+          const isTempoChain = input.chainId === tempoModerato.id;
+          const useDirectWalletOnTempo = isTempoChain;
           // #region agent log
           fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
             method: 'POST',
@@ -212,565 +127,128 @@ export function useEVVMDeployment() {
                 hasDeployParams: !!input.deployParams,
                 chainId: input.chainId,
               },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-          // #endregion
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
+        if (useDirectWalletOnTempo) {
+          const provider = await embeddedWallet?.getEthereumProvider?.();
+          if (!provider || typeof (provider as any).request !== 'function') {
+            throw new Error('Privy embedded wallet provider is not ready yet.');
+          }
+
+          const latestBlock = await publicClient.getBlock();
+          const estimatedFees = await publicClient
+            .estimateFeesPerGas({ type: 'eip1559' })
+            .catch(() => null);
+          const baseFeePerGas =
+            latestBlock.baseFeePerGas && latestBlock.baseFeePerGas > 0n
+              ? latestBlock.baseFeePerGas
+              : 20_000_000_000n;
+          const maxPriorityFeePerGas =
+            estimatedFees?.maxPriorityFeePerGas &&
+            estimatedFees.maxPriorityFeePerGas > 0n
+              ? estimatedFees.maxPriorityFeePerGas
+              : 1_000_000_000n;
+          const maxFeePerGas =
+            estimatedFees?.maxFeePerGas && estimatedFees.maxFeePerGas > baseFeePerGas
+              ? estimatedFees.maxFeePerGas
+              : baseFeePerGas * 2n + maxPriorityFeePerGas;
+
+          const sendViaEmbeddedProvider = async (request: {
+            to?: `0x${string}`;
+            data: `0x${string}`;
+            gas: bigint;
+            value?: bigint;
+          }) => {
+            const nonce = await publicClient.getTransactionCount({
+              address: embeddedWalletAddress,
+              blockTag: 'pending',
+            });
+            const tx = {
+              chainId: toHex(chain.id),
+              type: '0x2',
+              from: embeddedWalletAddress,
+              ...(request.to ? { to: request.to } : {}),
+              data: request.data,
+              gas: toHex(request.gas),
+              maxFeePerGas: toHex(maxFeePerGas),
+              maxPriorityFeePerGas: toHex(maxPriorityFeePerGas),
+              nonce: toHex(nonce),
+              value: toHex(request.value ?? 0n),
+            };
+
+            const signedTx = (await (provider as any).request({
+              method: 'eth_signTransaction',
+              params: [tx],
+            })) as `0x${string}`;
+
+            return (await publicClient.request({
+              method: 'eth_sendRawTransaction',
+              params: [signedTx],
+            })) as `0x${string}`;
+          };
+
           if (isContractDeploy && input.deployParams) {
-            let deployViaWallet =
-              input.walletContractDeploy === true || !canZeroDevDeploy;
+            const deployData = encodeDeployData({
+              abi: input.deployParams.abi as any,
+              bytecode: input.deployParams.bytecode,
+              args: input.deployParams.args as any,
+            }) as `0x${string}`;
 
-            if (canZeroDevDeploy && !deployViaWallet && !forceTempoWalletOnly) {
-              // #region agent log
-              fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                body: JSON.stringify({
-                  sessionId: '1c16cb',
-                  runId: 'debug-deploy-decision',
-                  hypothesisId: 'H1-zerodev-vs-privy',
-                  location: 'useEVVMDeployment.ts:coreDeploy:decision',
-                  message: 'Core deploy decision -> ZeroDev userOp',
-                  data: {
-                    deployViaWallet,
-                    canZeroDevDeploy,
-                    inputChainId: input.chainId,
-                    currentChainId: chain?.id ?? null,
-                  },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              const callDataRaw = await zerodevAccount.encodeDeployCallData(input.deployParams);
-              const callData = bundlerSafeHex(callDataRaw);
-              if (callData.length > ZERODEV_SPONSOR_CALLDATA_CHAR_LIMIT) {
-                // #region agent log
-                fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                  body: JSON.stringify({
-                    sessionId: '7a9c6a',
-                    runId: 'deploy',
-                    hypothesisId: 'H-32k-limit',
-                    location: 'useEVVMDeployment.ts:deploy',
-                    message: 'UserOp callData over sponsor limit, wallet deploy',
-                    data: { callDataLen: callData.length, limit: ZERODEV_SPONSOR_CALLDATA_CHAR_LIMIT },
-                    timestamp: Date.now(),
-                  }),
-                }).catch(() => {});
-                // #endregion
-                deployViaWallet = true;
-              } else {
-                const callGasLimit = sponsoredDeployCallGasLimit(input.deployParams);
-                // #region agent log
-                fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                  body: JSON.stringify({
-                    sessionId: '7a9c6a',
-                    runId: 'calldata-hex',
-                    hypothesisId: 'H-calldata-lowercase',
-                    location: 'useEVVMDeployment.ts:ZeroDev deploy',
-                    message: 'callData casing for bundler',
-                    data: {
-                      hadUppercaseHex: callDataRaw !== callData,
-                      callDataLen: callData.length,
-                      prefix: callData.slice(0, 24),
-                    },
-                    timestamp: Date.now(),
-                  }),
-                }).catch(() => {});
-                // #endregion
-                try {
-                  const sendUserOp = getAction(
-                    zerodevClient,
-                    sendUserOperation,
-                    'sendUserOperation'
-                  );
-                  const waitUoReceipt = getAction(
-                    zerodevClient,
-                    waitForUserOperationReceipt,
-                    'waitForUserOperationReceipt'
-                  );
-                  const userOpHash = await sendUserOp({
-                    account: zerodevAccount,
-                    callData,
-                    callGasLimit,
-                  });
-                  const uoReceipt = await waitUoReceipt({ hash: userOpHash });
-                  if (!uoReceipt.success) {
-                    const reason =
-                      uoReceipt.reason?.trim() ||
-                      'UserOp reverted (often out-of-gas for large contract deploys).';
-                    throw new Error(`Sponsored deploy failed: ${reason}`);
-                  }
-                  const hash = uoReceipt.receipt.transactionHash;
-                  // #region agent log
-                  fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                    body: JSON.stringify({
-                      sessionId: '7a9c6a',
-                      runId: 'deploy',
-                      hypothesisId: 'H2',
-                      location: 'useEVVMDeployment.ts:ZeroDev deploy success',
-                      message: 'ZeroDev sponsored deploy tx hash',
-                      data: { hash, userOpHash, callGasLimit: callGasLimit.toString() },
-                      timestamp: Date.now(),
-                    }),
-                  }).catch(() => {});
-                  // #endregion
-                  // #region agent log
-                  fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                    body: JSON.stringify({
-                      sessionId: '1c16cb',
-                      runId: 'debug-deploy-success',
-                      hypothesisId: 'H1-zerodev-vs-privy',
-                      location: 'useEVVMDeployment.ts:coreDeploy:zeroDev-success',
-                      message: 'ZeroDev deploy completed (tx hash from userOp)',
-                      data: { hash, userOpHash, callGasLimit: callGasLimit.toString() },
-                      timestamp: Date.now(),
-                    }),
-                  }).catch(() => {});
-                  // #endregion
-                  return hash as `0x${string}`;
-                } catch (e: unknown) {
-                  const errMsg = e instanceof Error ? e.message : String(e);
-                  // #region agent log
-                  fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                    body: JSON.stringify({
-                      sessionId: '1c16cb',
-                      runId: 'zerodev-core-delegatecall-fallback',
-                      hypothesisId: 'H0-zerodev-delegatecall-failed',
-                      location: 'useEVVMDeployment.ts:coreDeploy:zerodev-fallback',
-                      message: 'ZeroDev core delegatecall simulation failed; falling back to Privy wallet sendTransaction(sponsor=true)',
-                      data: { errMsg },
-                      timestamp: Date.now(),
-                    }),
-                  }).catch(() => {});
-                  // #endregion
-                  deployViaWallet = true;
-                }
-              }
-            }
-
-            if (deployViaWallet) {
-              const sponsorBase = import.meta.env.VITE_LARGE_DEPLOY_SPONSOR_URL?.replace(
-                /\/$/,
-                ''
-              );
-              const sponsorFromEnv = import.meta.env.VITE_LARGE_DEPLOY_SPONSOR_FROM as
-                | `0x${string}`
-                | undefined;
-              const sponsorSecret = import.meta.env.VITE_SPONSOR_API_SECRET as string | undefined;
-              if (
-                sponsorBase &&
-                sponsorFromEnv &&
-                input.walletContractDeploy === true &&
-                input.chainId === 42431 &&
-                !forceTempoWalletOnly
-              ) {
-                const r = await fetch(`${sponsorBase}/deploy`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    ...(sponsorSecret ? { 'X-Sponsor-Secret': sponsorSecret } : {}),
-                  },
-                  body: JSON.stringify({
-                    chainId: input.chainId,
-                    data: bundlerSafeHex(input.data),
-                  }),
-                });
-                const text = await r.text();
-                if (!r.ok) {
-                  throw new Error(
-                    `Platform treasury deploy failed (${r.status}): ${text.slice(0, 500)}. Fund DEPLOY_SPONSOR_PRIVATE_KEY with native gas on the deployment chain or run npm run dev:sponsor.`
-                  );
-                }
-                const { hash } = JSON.parse(text) as { hash: `0x${string}` };
-                // #region agent log
-                fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                  body: JSON.stringify({
-                    sessionId: '7a9c6a',
-                    runId: 'deploy',
-                    hypothesisId: 'H-treasury-sponsor',
-                    location: 'useEVVMDeployment.ts:treasurySponsor',
-                    message: 'EVVM Core via platform deploy treasury',
-                    data: { hash, sponsorBase: sponsorBase.slice(0, 48) },
-                    timestamp: Date.now(),
-                  }),
-                }).catch(() => {});
-                // #endregion
-                return hash;
-              }
-              if (!walletClient) {
-                throw new Error('Tempo walletClient is not ready to submit the deployment transaction.');
-              }
-              // #region agent log
-              fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                body: JSON.stringify({
-                  sessionId: '7a9c6a',
-                  runId: 'deploy',
-                  hypothesisId: 'H-wallet-deploy',
-                  location: 'useEVVMDeployment.ts:walletContractDeploy',
-                  message: 'EOA contract deploy (paid gas)',
-                  data: {
-                    forcedWallet: input.walletContractDeploy === true,
-                    walletContractDeploy: input.walletContractDeploy,
-                  },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              /** Wallet default gas ~1.2M is far below large Core CREATE; low gas → receipt success but getCode 0x. */
-              const gasLimit =
-                input.deployParams != null
-                  ? walletLargeCreateGasLimit(input.deployParams)
-                  : 12_000_000n;
-              // #region agent log
-              fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                body: JSON.stringify({
-                  sessionId: '7a9c6a',
-                  runId: 'post-fix-gas',
-                  hypothesisId: 'H-gas-limit',
-                  location: 'useEVVMDeployment.ts:walletCoreDeploy',
-                  message: 'EOA Core deploy with explicit gas',
-                  data: { gasLimit: gasLimit.toString(), walletContractDeploy: true },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              const deployData = bundlerSafeHex(input.data);
-              // #region agent log
-              fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Debug-Session-Id': '1c16cb',
-                },
-                body: JSON.stringify({
-                  sessionId: '1c16cb',
-                  runId: 'pre-initcode-check',
-                  hypothesisId: 'H1-initcode-prefix',
-                  location: 'useEVVMDeployment.ts:core-initcode-check',
-                  message: 'Core CREATE initcode prefix pre-check',
-                  data: {
-                    chainId: input.chainId,
-                    rawDataPrefix: input.data.slice(0, 12),
-                    safeDataPrefix: deployData.slice(0, 12),
-                    safeStartsExpected: deployData.startsWith('0x60806040'),
-                    rawDataStartsExpected: input.data.startsWith('0x60806040'),
-                    deployDataByteLen: (deployData.length - 2) / 2,
-                    bytecodePrefix: input.deployParams.bytecode.slice(0, 12),
-                    bytecodeByteLen: (input.deployParams.bytecode.length - 2) / 2,
-                    argsCount: input.deployParams.args.length,
-                  },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              // #region agent log
-              fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Debug-Session-Id': '1c16cb',
-                },
-                body: JSON.stringify({
-                  sessionId: '1c16cb',
-                  runId: 'pre-initcode-check',
-                  hypothesisId: 'H2-data-is-not-initcode',
-                  location: 'useEVVMDeployment.ts:core-initcode-check',
-                  message: 'Validate initcode-like shape',
-                  data: {
-                    rawDataStartsWith0x: input.data.startsWith('0x'),
-                    safeDataStartsWith0x: deployData.startsWith('0x'),
-                    safeDataByteLen: (deployData.length - 2) / 2,
-                    expectedBytecodeByteLen: (input.deployParams.bytecode.length - 2) / 2,
-                    inputDataLen: input.data.length,
-                    bytecodeStartsWith0x60: input.deployParams.bytecode.startsWith('0x60'),
-                  },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              // #region agent log
-              fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Debug-Session-Id': '1c16cb',
-                },
-                body: JSON.stringify({
-                  sessionId: '1c16cb',
-                  runId: 'pre-initcode-check',
-                  hypothesisId: 'H3-safehex-is-altering-data',
-                  location: 'useEVVMDeployment.ts:core-initcode-check',
-                  message: 'Check whether safehex changes prefix',
-                  data: {
-                    rawDataPrefix: input.data.slice(0, 12),
-                    safeDataPrefix: deployData.slice(0, 12),
-                    prefixEqual: input.data.slice(0, 12).toLowerCase() === deployData.slice(0, 12),
-                  },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              // The initcode prefix is determined by the compiled creation bytecode.
-              // Hardcoding a single prefix breaks across bytecode versions.
-              const expectedCoreBytecodePrefix = input.deployParams.bytecode
-                .slice(0, 12)
-                .toLowerCase();
-              const actualInitcodePrefix = deployData.slice(0, 12).toLowerCase();
-              if (actualInitcodePrefix !== expectedCoreBytecodePrefix) {
-                throw new Error(
-                  'Internal error: EVVM Core creation payload is not valid Solidity initcode. ' +
-                    `Expected initcode prefix ${expectedCoreBytecodePrefix}, got ${actualInitcodePrefix}.`
-                );
-              }
-              // #region agent log
-              fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                body: JSON.stringify({
-                  sessionId: '1c16cb',
-                  runId: 'post-fix-guard-pass',
-                  hypothesisId: 'H1-initcode-prefix',
-                  location: 'useEVVMDeployment.ts:core-initcode-check:guard-pass',
-                  message: 'Core CREATE initcode prefix guard passed',
-                  data: {
-                    expectedCoreBytecodePrefix,
-                    actualInitcodePrefix,
-                  },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              let hash: `0x${string}`;
-              const usedEthSendTransaction = true; // walletClient submits eth_sendTransaction
-              try {
-                // #region agent log
-                fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                  body: JSON.stringify({
-                    sessionId: '1c16cb',
-                    runId: 'no-fee-payer-tx-before-send',
-                    hypothesisId: 'H4-fee-payer-transaction-type',
-                    location: 'useEVVMDeployment.ts:walletCoreDeploy:before-sendTransaction',
-                    message: 'About to call walletClient.sendTransaction',
-                    data: {
-                      deployDataPrefix: deployData.slice(0, 18),
-                      gasLimit: gasLimit.toString(),
-                      feePayer: undefined,
-                    },
-                    timestamp: Date.now(),
-                  }),
-                }).catch(() => {});
-                // #endregion
-                // #region agent log
-                fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                  body: JSON.stringify({
-                    sessionId: '1c16cb',
-                    runId: 'debug-core-wallet-send',
-                    hypothesisId: 'H2-sponsor-ignored',
-                    location: 'useEVVMDeployment.ts:coreDeploy:wallet-before-sendTransaction',
-                    message: 'Core deploy via walletClient.sendTransaction',
-                    data: {
-                      usedEthSendTransaction,
-                      feePayer: undefined,
-                      chainId: chain?.id ?? null,
-                      walletClientAccount:
-                        typeof walletClient?.account === 'string' ? walletClient.account : null,
-                    },
-                    timestamp: Date.now(),
-                  }),
-                }).catch(() => {});
-                // #endregion
-                hash = (
-                  await walletClient.sendTransaction({
-                    chainId: input.chainId,
-                    data: deployData,
-                    value: 0n,
-                    gas: gasLimit,
-                  } as Parameters<typeof walletClient.sendTransaction>[0])
-                ).hash;
-              } catch (e: unknown) {
-                const errMsg = e instanceof Error ? e.message : String(e);
-                // #region agent log
-                fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'X-Debug-Session-Id': '1c16cb',
-                  },
-                  body: JSON.stringify({
-                    sessionId: '1c16cb',
-                    runId: 'no-fee-payer-tx-failure',
-                    hypothesisId: 'H4-fee-payer-transaction-type',
-                    location: 'useEVVMDeployment.ts:walletCoreDeploy:feePayer-core',
-                    message: 'walletClient.sendTransaction failed',
-                    data: {
-                      errMsg,
-                      deployDataPrefix: deployData.slice(0, 18),
-                      gasLimit: gasLimit.toString(),
-                    },
-                    timestamp: Date.now(),
-                  }),
-                }).catch(() => {});
-                // #endregion
-
-                throw new Error(
-                  `Core contract creation failed for Core contract creation. ` +
-                    `Original error: ${errMsg}`
-                );
-              }
-              if (publicClient) {
-                await verifyMempoolMatchesCreateData(publicClient, hash, deployData);
-              }
-              // #region agent log
-              fetch('http://127.0.0.1:7320/ingest/71c8c4fb-0b3d-4f6d-866d-53840d69f636', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a9c6a' },
-                body: JSON.stringify({
-                  sessionId: '7a9c6a',
-                  runId: 'create-verify',
-                  hypothesisId: 'H-privy-eth-send',
-                  location: 'useEVVMDeployment.ts:walletCoreDeploy:afterVerify',
-                  message: 'Core CREATE calldata matched mempool',
-                  data: { hash, usedEthSendTransaction },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-              return hash;
-            }
-          }
-          if (useZeroDevForCall && !forceTempoWalletOnly) {
-            // #region agent log
-            fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-              body: JSON.stringify({
-                sessionId: '1c16cb',
-                runId: 'debug-call-decision',
-                hypothesisId: 'H1-zerodev-vs-privy',
-                location: 'useEVVMDeployment.ts:contractCall:zeroDev-branch',
-                message: 'Contract call -> ZeroDev userOp (no Privy sponsor flag)',
-                data: {
-                  to: input.to ?? null,
-                  inputChainId: input.chainId,
-                  currentChainId: chain?.id ?? null,
-                },
-                timestamp: Date.now(),
-              }),
-            }).catch(() => {});
-            // #endregion
+            let gas = walletLargeCreateGasLimit(input.deployParams);
             try {
-              const hash = await zerodevClient.sendTransaction({
-                account: zerodevAccount,
-                chain: zerodevClient.chain ?? undefined,
-                to: input.to,
-                data: bundlerSafeHex(input.data),
-                value: input.value ?? 0n,
+              const estimatedGas = await publicClient.estimateGas({
+                account: embeddedWalletAddress,
+                data: deployData,
               });
-              return hash as `0x${string}`;
-            } catch (e: unknown) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              // #region agent log
-              fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-                body: JSON.stringify({
-                  sessionId: '1c16cb',
-                  runId: 'zerodev-call-fallback',
-                  hypothesisId: 'H0-zerodev-delegatecall-failed',
-                  location: 'useEVVMDeployment.ts:contractCall:zerodev-fallback',
-                  message: 'ZeroDev contract call failed; falling back to Privy wallet sendTransaction(sponsor=true)',
-                  data: { errMsg, to: input.to ?? null },
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
+              const paddedGas = (estimatedGas * 130n) / 100n;
+              if (paddedGas > gas) {
+                gas = paddedGas;
+              }
+            } catch {
+              // Tempo RPC estimation can intermittently fail; keep the conservative fallback heuristic.
             }
-          }
-          if (!walletClient) {
-            throw new Error('Tempo walletClient is not ready to submit the contract call transaction.');
-          }
-          let hash: `0x${string}`;
-          try {
-            // #region agent log
-            fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-              body: JSON.stringify({
-                sessionId: '1c16cb',
-                runId: 'debug-call-wallet-sponsor',
-                hypothesisId: 'H2-sponsor-flag',
-                location: 'useEVVMDeployment.ts:contractCall:privy-before-sendTransaction-call',
-                message: 'About to call walletClient.sendTransaction for contract call',
-                data: {
-                  to: input.to,
-                  inputChainId: input.chainId,
-                  currentChainId: chain?.id ?? null,
-                },
-                timestamp: Date.now(),
-              }),
-            }).catch(() => {});
-            // #endregion
-            hash = (
-              await walletClient.sendTransaction({
-                chainId: input.chainId,
-                to: input.to,
-                data: input.data,
-                value: input.value ?? 0n,
-              } as Parameters<typeof walletClient.sendTransaction>[0])
-            ).hash;
-          } catch (e: unknown) {
-            const errMsg = e instanceof Error ? e.message : String(e);
-            // #region agent log
-            fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-Debug-Session-Id': '1c16cb',
-              },
-              body: JSON.stringify({
-                sessionId: '1c16cb',
-                runId: 'no-fee-payer-tx-failure-call',
-                hypothesisId: 'H4-fee-payer-transaction-type',
-                location: 'useEVVMDeployment.ts:sendSponsoredTransaction:feePayer-call',
-                message: 'walletClient.sendTransaction failed for call',
-                data: {
-                  errMsg,
-                  to: input.to ?? null,
-                  dataPrefix: input.data.slice(0, 18),
-                },
-                timestamp: Date.now(),
-              }),
-            }).catch(() => {});
-            // #endregion
 
-            throw new Error(
-              `Contract call failed. ` + `Original error: ${errMsg}`
-            );
+            const hash = await sendViaEmbeddedProvider({
+              data: deployData,
+              gas,
+            });
+            return hash as `0x${string}`;
           }
-          return hash;
+
+          if (!input.to) {
+            throw new Error('Direct wallet transaction is missing a recipient.');
+          }
+
+          let gas = 500_000n;
+          try {
+            const estimatedGas = await publicClient.estimateGas({
+              account: embeddedWalletAddress,
+              to: input.to,
+              data: input.data,
+              value: input.value ?? 0n,
+            });
+            gas = (estimatedGas * 120n) / 100n;
+          } catch {
+            // Keep a reasonable fallback for small setup calls.
+          }
+
+          const hash = await sendViaEmbeddedProvider({
+            to: input.to,
+            data: input.data,
+            value: input.value ?? 0n,
+            gas,
+          });
+          return hash as `0x${string}`;
+        }
+
+        throw new Error('Tempo deployment only supports direct funded-wallet transactions on Tempo Testnet (Moderato).');
         };
 
-        const contractDeployerAddress = deployerAddress as `0x${string}`;
+        const contractDeployerAddress = useDirectTempoWalletFlow
+          ? (embeddedWalletAddress as `0x${string}`)
+          : (embeddedWalletAddress as `0x${string}`);
         const addresses: ContractAddresses = await deployEVVMContracts(
           config,
           publicClient,
@@ -785,11 +263,8 @@ export function useEVVMDeployment() {
             saveDeployment(record);
           },
           {
+            aaDeployerAddress: undefined,
             contractDeployerAddress,
-            eoaAddressForLargeDeploy: deployerAddress as `0x${string}` | undefined,
-            // Force using the connected Tempo wallet/embedded EOA for the actual deploy sender.
-            // This keeps Core + metadata prediction consistent with the transaction sender.
-            treasuryDeployerAddress: undefined,
           }
         );
 
@@ -798,43 +273,33 @@ export function useEVVMDeployment() {
         record.nameServiceAddress = addresses.nameService;
         record.estimatorAddress = addresses.estimator;
         record.treasuryAddress = addresses.treasury;
+        record.p2pSwapAddress = addresses.p2pSwap;
         record.deploymentStatus = 'completed';
-        record.currentStep = 7;
+        record.currentStep = 8;
         saveDeployment(record);
 
         setProgress({
           stage: 'complete',
           message: 'Deployment complete!',
-          step: 7,
-          totalSteps: 7,
+          step: 8,
+          totalSteps: 8,
         });
 
         return record;
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-            // #region agent log
-            fetch('http://127.0.0.1:7507/ingest/c08c81b9-0eaa-43a9-821e-80d55eb4208b', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '1c16cb' },
-              body: JSON.stringify({
-                sessionId: '1c16cb',
-                runId: 'deploy-top-level-error',
-                hypothesisId: 'H-top-level',
-                location: 'useEVVMDeployment.ts:deploy:catch',
-                message: 'Top-level deploy error',
-                data: { msg },
-                timestamp: Date.now(),
-              }),
-            }).catch(() => {});
-            // #endregion
+      } catch (err: any) {
+        const rawMsg = err?.message || 'Deployment failed';
+        const msg =
+          typeof rawMsg === 'string' && rawMsg.includes('insufficient funds for gas * price + value')
+            ? 'The Privy wallet does not have enough native Tempo gas to pay for this transaction. PathUSD is not used for deployment gas. Fund the wallet with native Tempo testnet gas, then retry.'
+            : rawMsg;
         record.deploymentStatus = 'failed';
         saveDeployment(record);
-        setError(msg || 'Deployment failed');
+        setError(msg);
         setProgress({
           stage: 'failed',
-          message: msg || 'Deployment failed',
+          message: msg,
           step: record.currentStep,
-          totalSteps: 7,
+          totalSteps: 8,
         });
         return null;
       } finally {
@@ -845,11 +310,10 @@ export function useEVVMDeployment() {
       publicClient,
       chain,
       walletsReady,
-      deployerAddress,
-      zerodevClient,
-      zerodevAccount,
-      zerodevIsLoading,
-      walletClient,
+      embeddedWalletAddress,
+      embeddedWallet,
+      hasEmbeddedProvider,
+      useDirectTempoWalletFlow,
     ]
   );
 

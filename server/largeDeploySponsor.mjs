@@ -11,7 +11,7 @@ import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { baseSepolia } from 'viem/chains';
+import { baseSepolia, tempoModerato } from 'viem/chains';
 
 dotenv.config({ path: fileURLToPath(new URL('./.env', import.meta.url)) });
 dotenv.config({ path: fileURLToPath(new URL('../.env', import.meta.url)) });
@@ -20,8 +20,26 @@ const PK = process.env.DEPLOY_SPONSOR_PRIVATE_KEY;
 const PORT = Number(process.env.LARGE_DEPLOY_SPONSOR_PORT || 8788);
 const HOST = process.env.LARGE_DEPLOY_SPONSOR_HOST || '127.0.0.1';
 const SECRET = process.env.SPONSOR_API_SECRET || '';
+const CHAIN_ID = Number(process.env.DEPLOY_SPONSOR_CHAIN_ID || tempoModerato.id);
+const CHAINS = {
+  [baseSepolia.id]: baseSepolia,
+  [tempoModerato.id]: tempoModerato,
+};
+const chain = CHAINS[CHAIN_ID];
+
+if (!chain) {
+  console.error(
+    `Unsupported DEPLOY_SPONSOR_CHAIN_ID=${CHAIN_ID}. Use ${tempoModerato.id} (Tempo Moderato) or ${baseSepolia.id} (Base Sepolia).`
+  );
+  process.exit(1);
+}
+
 const RPC =
-  process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
+  process.env.DEPLOY_SPONSOR_RPC_URL ||
+  (chain.id === tempoModerato.id
+    ? process.env.TEMPO_MODERATO_RPC_URL
+    : process.env.BASE_SEPOLIA_RPC_URL) ||
+  chain.rpcUrls.default.http[0];
 
 if (!PK || !/^0x[0-9a-fA-F]{64}$/.test(PK)) {
   console.error('Set DEPLOY_SPONSOR_PRIVATE_KEY (0x + 64 hex) in server/.env or root .env');
@@ -31,7 +49,7 @@ if (!PK || !/^0x[0-9a-fA-F]{64}$/.test(PK)) {
 const account = privateKeyToAccount(PK);
 const walletClient = createWalletClient({
   account,
-  chain: baseSepolia,
+  chain,
   transport: http(RPC),
 });
 
@@ -40,6 +58,7 @@ console.log(
   '[largeDeploySponsor] platform treasury address (VITE_LARGE_DEPLOY_SPONSOR_FROM):',
   account.address
 );
+console.log('[largeDeploySponsor] chain:', `${chain.name} (${chain.id})`);
 if (!SECRET) console.warn('[largeDeploySponsor] SPONSOR_API_SECRET unset — only use on localhost');
 
 const app = express();
@@ -57,8 +76,8 @@ app.post('/deploy', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const { chainId, data } = req.body || {};
-    if (chainId !== baseSepolia.id) {
-      return res.status(400).json({ error: `Only chain ${baseSepolia.id} (Base Sepolia)` });
+    if (chainId !== chain.id) {
+      return res.status(400).json({ error: `Only chain ${chain.id} (${chain.name})` });
     }
     if (typeof data !== 'string' || !data.startsWith('0x') || data.length % 2 !== 0) {
       return res.status(400).json({ error: 'Invalid hex data' });
@@ -82,7 +101,7 @@ app.post('/deploy', async (req, res) => {
 });
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, address: account.address, chainId: baseSepolia.id });
+  res.json({ ok: true, address: account.address, chainId: chain.id, chainName: chain.name });
 });
 
 app.listen(PORT, HOST);

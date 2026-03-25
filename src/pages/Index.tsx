@@ -1,8 +1,7 @@
 import { useAccount } from 'wagmi';
 import { useNavigate } from 'react-router-dom';
-import { useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Hexagon, Rocket, PenTool, LayoutDashboard, ArrowRight } from 'lucide-react';
+import { Hexagon, Rocket, PenTool, LayoutDashboard, ArrowRight, Wallet, Coins, BadgeDollarSign } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Link } from 'react-router-dom';
 import { PrivyConnectButton } from '@/components/privy/PrivyConnectButton';
@@ -11,20 +10,43 @@ const features = [
   {
     icon: Rocket,
     title: 'Deploy EVVM',
-    description: 'Deploy 5 smart contracts to create a complete virtual blockchain on Tempo Testnet (Moderato)',
+    description: 'Start the EVVM setup flow with your Privy social wallet and Tempo deployment tools.',
     to: '/deploy',
   },
   {
     icon: PenTool,
     title: 'Sign Transactions',
-    description: 'Generate EIP-191 signatures for pay, dispersePay, and staking operations',
+    description: 'Generate EIP-191 signatures for pay, dispersePay, and staking operations from your Privy wallet.',
     to: '/signatures',
   },
   {
     icon: LayoutDashboard,
     title: 'Dashboard',
-    description: 'Track and manage all your EVVM deployments with full manifest export',
+    description: 'Track deployments, wallet addresses, and the next actions toward Sepolia registration.',
     to: '/dashboard',
+  },
+];
+
+const journey = [
+  {
+    icon: Wallet,
+    title: '1. Social Login',
+    description: 'Use Privy email or Google login to create the embedded wallet that will hold test assets and authorizations.',
+  },
+  {
+    icon: Coins,
+    title: '2. Fund The Wallet',
+    description: 'Top up the Privy wallet with Tempo gas and test assets such as PathUSD from a faucet or treasury path.',
+  },
+  {
+    icon: BadgeDollarSign,
+    title: '3. Use EVVM Operations',
+    description: 'Make payment and staking signatures from the funded wallet while ZeroDev sponsorship is used where supported.',
+  },
+  {
+    icon: Rocket,
+    title: '4. Register Later',
+    description: 'Treat Sepolia EVVM registration as the follow-on step once the instance and payment path are ready.',
   },
 ];
 
@@ -47,14 +69,14 @@ export default function Index() {
         </div>
 
         <h1 className="text-3xl md:text-5xl font-bold tracking-tight mb-4">
-          Deploy Your Virtual
+          Launch Your Social-Login
           <br />
-          <span className="text-gradient-primary">Blockchain Instance</span>
+          <span className="text-gradient-primary">EVVM Wallet Flow</span>
         </h1>
 
-        <p className="text-muted-foreground max-w-md mx-auto mb-8 text-sm md:text-base">
-          Infraless EVM virtualization. Deploy EVVM contracts, generate EIP-191 signatures,
-          and manage your virtual blockchain — all from your browser.
+        <p className="text-muted-foreground max-w-2xl mx-auto mb-8 text-sm md:text-base">
+          Keep Privy for social login, treat the embedded wallet as the account you fund, and use this app for
+          EVVM deployment attempts, payment signatures, and the eventual Sepolia registration path.
         </p>
 
         {!isConnected ? (
@@ -95,6 +117,30 @@ export default function Index() {
           </motion.div>
         ))}
       </div>
+
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.35, duration: 0.5 }}
+        className="mt-10 rounded-md border border-border bg-card/60 p-5"
+      >
+        <div className="mb-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">Recommended Path</p>
+          <h2 className="mt-2 text-lg font-semibold">Privy social wallet first, sponsorship where it works</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            This keeps the product centered on social login instead of assuming every Tempo contract deployment can be sponsored end to end.
+          </p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          {journey.map((step) => (
+            <div key={step.title} className="rounded-md border border-border/80 bg-background/50 p-4">
+              <step.icon className="h-4 w-4 text-primary mb-2" />
+              <h3 className="text-sm font-medium">{step.title}</h3>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{step.description}</p>
+            </div>
+          ))}
+        </div>
+      </motion.div>
 
       {/* Tech Stack */}
       <motion.div

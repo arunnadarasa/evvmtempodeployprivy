@@ -157,7 +157,7 @@ export default function Signatures() {
         <PenTool className="h-8 w-8 text-primary mx-auto mb-4" />
         <h1 className="text-xl font-bold mb-2">Connect Wallet to Sign</h1>
         <p className="text-sm text-muted-foreground mb-6">
-          Connect your wallet to generate EIP-191 signatures for EVVM operations.
+          Connect with Privy to generate EIP-191 signatures from the same social-login wallet you fund for EVVM payments and staking.
         </p>
         <div className="flex justify-center">
           <PrivyConnectButton size="default" />
@@ -170,7 +170,9 @@ export default function Signatures() {
     <main className="container max-w-2xl px-4 py-8">
       <div className="mb-6">
         <h1 className="text-lg font-bold">Signature Builder</h1>
-        <p className="text-xs text-muted-foreground">Generate EIP-191 signed messages for EVVM operations</p>
+        <p className="text-xs text-muted-foreground">
+          Use your Privy wallet as the social-login operator account for EVVM pay, dispersePay, and staking flows.
+        </p>
       </div>
 
       <Tabs defaultValue="pay" className="space-y-4">

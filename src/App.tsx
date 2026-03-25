@@ -7,6 +7,7 @@ import Index from "./pages/Index";
 import Deploy from "./pages/Deploy";
 import Signatures from "./pages/Signatures";
 import Dashboard from "./pages/Dashboard";
+import Register from "./pages/Register";
 import NotFound from "./pages/NotFound";
 
 const App = () => (
@@ -19,6 +20,7 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/deploy" element={<Deploy />} />
+            <Route path="/register" element={<Register />} />
             <Route path="/signatures" element={<Signatures />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="*" element={<NotFound />} />

@@ -14,6 +14,7 @@ export interface DeploymentRecord {
   nameServiceAddress?: string;
   estimatorAddress?: string;
   treasuryAddress?: string;
+  p2pSwapAddress?: string;
   deploymentStatus: 'pending' | 'deploying' | 'setup' | 'registering' | 'completed' | 'failed';
   currentStep: number;
   txHashes: Record<string, string>;
@@ -42,6 +43,10 @@ export function saveDeployment(deployment: DeploymentRecord): void {
   } else {
     deployments.unshift(deployment);
   }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(deployments));
+}
+
+export function saveDeployments(deployments: DeploymentRecord[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(deployments));
 }
 

@@ -19,6 +19,7 @@ export function ManifestCard({ deployment }: ManifestCardProps) {
     { label: 'NameService', address: deployment.nameServiceAddress },
     { label: 'Estimator', address: deployment.estimatorAddress },
     { label: 'Treasury', address: deployment.treasuryAddress },
+    { label: 'P2PSwap', address: deployment.p2pSwapAddress },
   ];
 
   const handleCopy = () => {

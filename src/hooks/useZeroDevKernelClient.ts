@@ -166,6 +166,7 @@ export function useZeroDevKernelClient(): {
 
         const entryPoint = constants.getEntryPoint('0.7');
         const kernelVersion = constants.KERNEL_V3_1;
+        const useMetaFactory = chainId !== tempoModerato.id;
 
         const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
           signer,
@@ -178,6 +179,9 @@ export function useZeroDevKernelClient(): {
           plugins: { sudo: ecdsaValidator },
           entryPoint,
           kernelVersion,
+          // Tempo has the standard Kernel contracts deployed, but the meta-factory path
+          // has been the earliest common failure point in sponsorship simulation here.
+          useMetaFactory,
         });
         if (cancelled) return;
 
@@ -253,4 +257,3 @@ export function useZeroDevKernelClient(): {
 
   return { client, account, isLoading, error };
 }
-

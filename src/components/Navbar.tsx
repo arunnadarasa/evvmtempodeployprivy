@@ -1,11 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
-import { Hexagon, Rocket, PenTool, LayoutDashboard } from 'lucide-react';
+import { Hexagon, Rocket, PenTool, LayoutDashboard, Orbit } from 'lucide-react';
 import { PrivyConnectButton } from '@/components/privy/PrivyConnectButton';
 
 const navItems = [
   { to: '/', label: 'Home', icon: Hexagon },
   { to: '/deploy', label: 'Deploy', icon: Rocket },
+  { to: '/register', label: 'Register', icon: Orbit },
   { to: '/signatures', label: 'Signatures', icon: PenTool },
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
 ];

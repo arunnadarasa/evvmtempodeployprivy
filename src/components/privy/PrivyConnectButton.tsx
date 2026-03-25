@@ -8,7 +8,6 @@ function formatAddr(addr: string) {
 export function PrivyConnectButton({ size = 'sm' }: { size?: 'sm' | 'default' }) {
   const { ready, authenticated, user, logout } = usePrivy();
   const { login } = useLogin();
-
   const primaryWallet = user?.wallet?.address;
 
   if (!ready) {
@@ -33,4 +32,3 @@ export function PrivyConnectButton({ size = 'sm' }: { size?: 'sm' | 'default' })
     </Button>
   );
 }
-

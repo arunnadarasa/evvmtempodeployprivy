@@ -12,20 +12,18 @@ import {
   StakingABI,
   NameServiceABI,
   EstimatorABI,
+  P2PSwapABI,
 } from '@evvm/viem-signature-library';
 import {
   STAKING_BYTECODE,
   EVVM_CORE_BYTECODE,
+  CORE_HASH_UTILS_BYTECODE,
+  EVVM_CORE_LINK_REFERENCES,
   NAME_SERVICE_BYTECODE,
   ESTIMATOR_BYTECODE,
   TREASURY_BYTECODE,
+  P2P_SWAP_BYTECODE,
 } from './bytecodes';
-
-/** EVVM: principal token virtual address shares Core prefix, last byte 0x01 (EIP-55 checksummed for viem ABI encoding). */
-function principalTokenVirtualAddress(evvmCore: Address): Address {
-  const body = `${evvmCore.slice(2, 40)}01`.toLowerCase();
-  return getAddress(`0x${body}` as `0x${string}`);
-}
 
 export type DeploymentStage =
   | 'idle'
@@ -34,6 +32,7 @@ export type DeploymentStage =
   | 'deploying-nameservice'
   | 'deploying-estimator'
   | 'deploying-treasury'
+  | 'deploying-p2pswap'
   | 'setup-evvm'
   | 'setup-staking'
   | 'deployment-complete'
@@ -70,6 +69,7 @@ export interface ContractAddresses {
   nameService?: Address;
   estimator?: Address;
   treasury?: Address;
+  p2pSwap?: Address;
 }
 
 /** ZeroDev zd_sponsorUserOperation rejects UserOps with callData past ~32KB (error misreported as "invalid hex"). */
@@ -77,6 +77,27 @@ export const ZERODEV_SPONSOR_CALLDATA_CHAR_LIMIT = 32600;
 /** Core initcode is large enough that Kernel-wrapped UserOp exceeds sponsor limit; Staking-sized deploys stay under. */
 const CORE_INITCODE_BYTES = (EVVM_CORE_BYTECODE.length - 2) / 2;
 const STAKING_INITCODE_BYTES = (STAKING_BYTECODE.length - 2) / 2;
+const EVVM_VIRTUAL_PRINCIPAL_TOKEN_ADDRESS =
+  '0x0000000000000000000000000000000000000001' as Address;
+const TREASURY_CONSTRUCTOR_ABI = [
+  {
+    type: 'constructor',
+    inputs: [{ name: '_coreAddress', type: 'address' }],
+    stateMutability: 'nonpayable',
+  },
+] as const;
+const EVVM_SYSTEM_SETUP_ABI = [
+  {
+    type: 'function',
+    name: 'initializeSystemContracts',
+    inputs: [
+      { name: '_nameServiceAddress', type: 'address' },
+      { name: '_treasuryAddress', type: 'address' },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+] as const;
 
 /** Some RPCs return receipt before eth_getCode serves the new contract; try multiple CREATE candidates for wallet deploys. */
 async function resolveDeployedContractAddress(
@@ -175,6 +196,26 @@ export type SendSponsoredTransaction = (input: {
   /** Deploy contract via EOA (Privy) — gas not sponsored; used when Kernel UserOp exceeds sponsor size */
   walletContractDeploy?: boolean;
 }) => Promise<Hash>;
+
+function linkBytecode(
+  bytecode: `0x${string}`,
+  libraryAddress: Address,
+  refs: Array<{ start: number; length: number }>
+): `0x${string}` {
+  const addr = libraryAddress.toLowerCase().replace(/^0x/, '');
+  if (addr.length !== 40) {
+    throw new Error(`Invalid library address length: ${libraryAddress}`);
+  }
+
+  let hex = bytecode.replace(/^0x/, '');
+  for (const { start, length } of refs) {
+    const offset = start * 2;
+    const replaceLen = length * 2;
+    hex = hex.slice(0, offset) + addr + hex.slice(offset + replaceLen);
+  }
+
+  return `0x${hex}` as `0x${string}`;
+}
 
 async function deployContractWithRetry(
   publicClient: PublicClient,
@@ -410,18 +451,12 @@ export async function deployEVVMContracts(
   options: {
     aaDeployerAddress?: Address;
     contractDeployerAddress: Address;
-    /** Embedded EOA; used for Core prediction when not using treasury sponsor */
-    eoaAddressForLargeDeploy?: Address;
-    /** Platform treasury EOA — pays Core for every deploy; must match sponsor server key */
-    treasuryDeployerAddress?: Address;
   }
 ): Promise<ContractAddresses> {
   const addresses: ContractAddresses = {};
-  const totalSteps = 7;
+  const totalSteps = 8;
   const aa = options.aaDeployerAddress;
   const deployer = options.contractDeployerAddress;
-  const eoaLarge = options.eoaAddressForLargeDeploy;
-  const treasuryDeployer = options.treasuryDeployerAddress;
 
   // Step 1: Deploy Staking
   onProgress({ stage: 'deploying-staking', message: 'Deploying Staking contract...', step: 1, totalSteps });
@@ -436,12 +471,21 @@ export async function deployEVVMContracts(
   onProgress({ stage: 'deploying-staking', message: 'Staking deployed', txHash: staking.txHash, step: 1, totalSteps });
 
   // Step 2: Deploy EVVM Core (constructor: owner, staking, EvvmMetadata tuple)
+  const coreHashUtilsRefs =
+    ((EVVM_CORE_LINK_REFERENCES as any)?.['src/library/utils/signature/CoreHashUtils.sol']?.CoreHashUtils as
+      | Array<{ start: number; length: number }>
+      | undefined) ?? [];
+
+  if (coreHashUtilsRefs.length === 0) {
+    throw new Error('Missing CoreHashUtils link references for Core bytecode');
+  }
+
   const kernelCreateNonce = BigInt(
     await publicClient.getTransactionCount({ address: deployer, blockTag: 'latest' })
   );
   let predictedCore = getContractAddress({
     from: deployer,
-    nonce: kernelCreateNonce,
+    nonce: kernelCreateNonce + 1n,
     opcode: 'CREATE',
   });
   let evvmMetadata = {
@@ -449,40 +493,14 @@ export async function deployEVVMContracts(
     EvvmID: 0n,
     principalTokenName: config.principalTokenName,
     principalTokenSymbol: config.principalTokenSymbol,
-    principalTokenAddress: principalTokenVirtualAddress(predictedCore),
+    principalTokenAddress: EVVM_VIRTUAL_PRINCIPAL_TOKEN_ADDRESS,
     totalSupply: config.totalSupply,
     eraTokens: config.eraTokens,
     reward: config.rewardPerOperation,
   };
-  const deployCoreViaWallet =
-    CORE_INITCODE_BYTES > STAKING_INITCODE_BYTES + 2000;
-  if (deployCoreViaWallet) {
-    const predictFrom = treasuryDeployer ?? eoaLarge;
-    if (!predictFrom) {
-      throw new Error(
-        'EVVM Core creation needs a deployer (your platform deploy treasury, or the embedded wallet) with native gas on the deployment chain.'
-      );
-    }
-    const eoaNonce = BigInt(
-      await publicClient.getTransactionCount({ address: predictFrom, blockTag: 'latest' })
-    );
-    predictedCore = getContractAddress({
-      from: predictFrom,
-      nonce: eoaNonce,
-      opcode: 'CREATE',
-    });
-    evvmMetadata = {
-      ...evvmMetadata,
-      principalTokenAddress: principalTokenVirtualAddress(predictedCore),
-    };
-  }
   onProgress({
     stage: 'deploying-core',
-    message: deployCoreViaWallet
-      ? treasuryDeployer
-        ? 'Deploying EVVM Core (platform treasury)...'
-        : 'Deploying EVVM Core (your wallet gas)...'
-      : 'Deploying EVVM Core contract...',
+    message: 'Deploying EVVM Core contract...',
     step: 2,
     totalSteps,
   });
@@ -501,9 +519,7 @@ export async function deployEVVMContracts(
         data: {
           predictedCore,
           principalTokenAddress: usedVirtual,
-          validChecksum: usedVirtual === getAddress(usedVirtual.toLowerCase() as `0x${string}`),
-          deployCoreViaWallet,
-          treasuryDeployer: treasuryDeployer ?? null,
+          validChecksum: true,
           coreInitBytes: CORE_INITCODE_BYTES,
           stakingInitBytes: STAKING_INITCODE_BYTES,
         },
@@ -512,18 +528,32 @@ export async function deployEVVMContracts(
     }).catch(() => {});
   }
   // #endregion
-  const coreWalletDeployer =
-    deployCoreViaWallet && (treasuryDeployer ?? eoaLarge)
-      ? (treasuryDeployer ?? eoaLarge!)
-      : undefined;
+  onProgress({
+    stage: 'deploying-core',
+    message: 'Deploying CoreHashUtils library...',
+    step: 2,
+    totalSteps,
+  });
+  const coreHashUtils = await deployContractWithRetry(publicClient, sendSponsoredTransaction, {
+    abi: [],
+    bytecode: CORE_HASH_UTILS_BYTECODE,
+    args: [],
+    chainId,
+    aaDeployerAddress: aa,
+  });
+
+  const linkedCoreBytecode = linkBytecode(
+    EVVM_CORE_BYTECODE,
+    coreHashUtils.address,
+    coreHashUtilsRefs
+  );
+
   const core = await deployContractWithRetry(publicClient, sendSponsoredTransaction, {
     abi: EvvmABI,
-    bytecode: EVVM_CORE_BYTECODE,
+    bytecode: linkedCoreBytecode,
     args: [config.adminAddress, addresses.staking!, evvmMetadata],
     chainId,
     aaDeployerAddress: aa,
-    walletContractDeploy: deployCoreViaWallet,
-    walletDeployerAddress: coreWalletDeployer,
   });
   addresses.evvmCore = core.address;
   onProgress({ stage: 'deploying-core', message: 'EVVM Core deployed', txHash: core.txHash, step: 2, totalSteps });
@@ -560,20 +590,43 @@ export async function deployEVVMContracts(
   // Step 5: Deploy Treasury
   onProgress({ stage: 'deploying-treasury', message: 'Deploying Treasury contract...', step: 5, totalSteps });
   const treasury = await deployContractWithRetry(publicClient, sendSponsoredTransaction, {
-    abi: EvvmABI,
+    abi: TREASURY_CONSTRUCTOR_ABI,
     bytecode: TREASURY_BYTECODE,
-    args: [addresses.evvmCore!, config.adminAddress],
+    args: [addresses.evvmCore!],
     chainId,
     aaDeployerAddress: aa,
   });
   addresses.treasury = treasury.address;
   onProgress({ stage: 'deploying-treasury', message: 'Treasury deployed', txHash: treasury.txHash, step: 5, totalSteps });
 
-  // Step 6: Setup EVVM - Connect NameService + Treasury to Core
-  onProgress({ stage: 'setup-evvm', message: 'Connecting NameService & Treasury to Core...', step: 6, totalSteps });
+  // Step 6: Deploy P2PSwap
+  onProgress({
+    stage: 'deploying-p2pswap',
+    message: 'Deploying P2PSwap contract...',
+    step: 6,
+    totalSteps,
+  });
+  const p2pSwap = await deployContractWithRetry(publicClient, sendSponsoredTransaction, {
+    abi: P2PSwapABI,
+    bytecode: P2P_SWAP_BYTECODE,
+    args: [addresses.evvmCore!, addresses.staking!, config.adminAddress],
+    chainId,
+    aaDeployerAddress: aa,
+  });
+  addresses.p2pSwap = p2pSwap.address;
+  onProgress({
+    stage: 'deploying-p2pswap',
+    message: 'P2PSwap deployed',
+    txHash: p2pSwap.txHash,
+    step: 6,
+    totalSteps,
+  });
+
+  // Step 7: Setup EVVM - Connect NameService + Treasury to Core
+  onProgress({ stage: 'setup-evvm', message: 'Connecting NameService & Treasury to Core...', step: 7, totalSteps });
   const setupData1 = encodeFunctionData({
-    abi: EvvmABI,
-    functionName: '_setupNameServiceAndTreasuryAddress',
+    abi: EVVM_SYSTEM_SETUP_ABI,
+    functionName: 'initializeSystemContracts',
     args: [addresses.nameService!, addresses.treasury!],
   }) as `0x${string}`;
   const setupHash1 = await sendSponsoredTransaction({
@@ -586,12 +639,12 @@ export async function deployEVVMContracts(
     stage: 'setup-evvm',
     message: 'NameService & Treasury connected to Core',
     txHash: setupHash1,
-    step: 6,
+    step: 7,
     totalSteps,
   });
 
-  // Step 7: Setup Staking - Connect Estimator + EVVM to Staking
-  onProgress({ stage: 'setup-staking', message: 'Connecting Estimator & EVVM to Staking...', step: 7, totalSteps });
+  // Step 8: Setup Staking - Connect Estimator + EVVM to Staking
+  onProgress({ stage: 'setup-staking', message: 'Connecting Estimator & EVVM to Staking...', step: 8, totalSteps });
   const setupData2 = encodeFunctionData({
     abi: StakingABI,
     functionName: '_setupEstimatorAndEvvm',
@@ -603,9 +656,9 @@ export async function deployEVVMContracts(
     data: setupData2,
   });
   await publicClient.waitForTransactionReceipt({ hash: setupHash2 });
-  onProgress({ stage: 'setup-staking', message: 'Staking configured', txHash: setupHash2, step: 7, totalSteps });
+  onProgress({ stage: 'setup-staking', message: 'Staking configured', txHash: setupHash2, step: 8, totalSteps });
 
-  onProgress({ stage: 'deployment-complete', message: 'All contracts deployed and configured!', step: 7, totalSteps });
+  onProgress({ stage: 'deployment-complete', message: 'All contracts deployed and configured!', step: 8, totalSteps });
 
   return addresses;
 }

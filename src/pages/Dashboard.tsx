@@ -27,7 +27,7 @@ export default function Dashboard() {
         <LayoutDashboard className="h-8 w-8 text-muted-foreground mx-auto mb-4" />
         <h1 className="text-xl font-bold mb-2">No Deployments Yet</h1>
         <p className="text-sm text-muted-foreground mb-6">
-          Deploy your first EVVM instance to see it here.
+          Start with the Privy social wallet flow, then track deployments and later Sepolia registration progress here.
         </p>
         <Button asChild>
           <Link to="/deploy">Deploy Now</Link>
