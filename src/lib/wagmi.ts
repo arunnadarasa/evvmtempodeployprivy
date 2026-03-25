@@ -3,11 +3,22 @@ import { http } from 'viem';
 import { withFeePayer } from 'viem/tempo';
 import { sepolia, tempoModerato } from 'viem/chains';
 
+// Tempo fee token: "PathSUD" (different from default "PathUSD"/0).
+// viem's Tempo fee tokens are TIP-20 addresses; for PathSUD the address ends with `...0001`.
+const TEMPO_FEE_TOKEN_PATHSUD = '0x20c0000000000000000000000000000000000001';
+
+// Extend the chain definition with the correct fee token so `feePayer: true`
+// requests encode the right Tempo transaction type/fields.
+const tempoModeratoWithPathSUD = {
+  ...tempoModerato,
+  feeToken: TEMPO_FEE_TOKEN_PATHSUD,
+} as typeof tempoModerato & { feeToken: string };
+
 export const config = createConfig({
-  chains: [tempoModerato, sepolia],
+  chains: [tempoModeratoWithPathSUD, sepolia],
   transports: {
-    [tempoModerato.id]: withFeePayer(
-      http(tempoModerato.rpcUrls.default.http[0]),
+    [tempoModeratoWithPathSUD.id]: withFeePayer(
+      http(tempoModeratoWithPathSUD.rpcUrls.default.http[0]),
       http('https://sponsor.moderato.tempo.xyz')
     ),
     [sepolia.id]: http(sepolia.rpcUrls.default.http[0]),
@@ -15,7 +26,7 @@ export const config = createConfig({
 });
 
 export const SUPPORTED_CHAINS = {
-  TEMPO_MODERATO: tempoModerato,
+  TEMPO_MODERATO: tempoModeratoWithPathSUD,
   SEPOLIA: sepolia,
 } as const;
 

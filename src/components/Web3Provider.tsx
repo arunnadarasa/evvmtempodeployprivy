@@ -13,6 +13,9 @@ const privyConfig: PrivyClientConfig = {
   embeddedWallets: {
     ethereum: {
       createOnLogin: 'users-without-wallets',
+      // Bypass the embedded-wallet approval UX: Tempo Wallet/OWS flows are expected
+      // to be non-interactive in this setup.
+      showWalletUIs: false,
     },
   },
   appearance: {

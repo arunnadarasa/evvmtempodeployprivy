@@ -82,8 +82,9 @@ export default function Signatures() {
         account: walletClient.account!,
       });
       setSignature(sig);
-    } catch (e: any) {
-      setSignature(`Error: ${e.message}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSignature(`Error: ${msg}`);
     }
     setSigning(false);
   };
@@ -120,8 +121,9 @@ export default function Signatures() {
         account: walletClient.account!,
       });
       setSignature(sig);
-    } catch (e: any) {
-      setSignature(`Error: ${e.message}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSignature(`Error: ${msg}`);
     }
     setSigning(false);
   };
@@ -142,8 +144,9 @@ export default function Signatures() {
         account: walletClient.account!,
       });
       setSignature(sig);
-    } catch (e: any) {
-      setSignature(`Error: ${e.message}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSignature(`Error: ${msg}`);
     }
     setSigning(false);
   };

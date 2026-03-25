@@ -98,7 +98,7 @@ type Phase = 'configure' | 'deploy' | 'complete';
 
 export default function Deploy() {
   const { address, isConnected, chain } = useAccount();
-  const { deploying, progress, error, deploy } = useEVVMDeployment();
+  const { deploying, progress, error, deploy, canDeploy } = useEVVMDeployment();
   const [phase, setPhase] = useState<Phase>('configure');
   const [completedDeployment, setCompletedDeployment] = useState<DeploymentRecord | null>(null);
   const bytesReady = hasBytecodes();
@@ -287,7 +287,7 @@ export default function Deploy() {
 
                 <Button
                   onClick={handleDeploy}
-                  disabled={!evvmName || deploying || !bytesReady}
+                  disabled={!evvmName || deploying || !bytesReady || !canDeploy}
                   className="w-full h-9 text-sm glow-primary"
                 >
                   <Rocket className="h-3.5 w-3.5" />

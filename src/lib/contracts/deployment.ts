@@ -171,7 +171,7 @@ export type SendSponsoredTransaction = (input: {
   data: `0x${string}`;
   value?: bigint;
   /** When present, use ZeroDev encodeDeployCallData + sendTransaction for sponsored deploy */
-  deployParams?: { abi: any; bytecode: `0x${string}`; args: any[] };
+  deployParams?: { abi: unknown; bytecode: `0x${string}`; args: unknown[] };
   /** Deploy contract via EOA (Privy) — gas not sponsored; used when Kernel UserOp exceeds sponsor size */
   walletContractDeploy?: boolean;
 }) => Promise<Hash>;
@@ -180,9 +180,9 @@ async function deployContractWithRetry(
   publicClient: PublicClient,
   sendSponsoredTransaction: SendSponsoredTransaction,
   params: {
-    abi: any;
+    abi: unknown;
     bytecode: `0x${string}`;
-    args: any[];
+    args: unknown[];
     chainId: number;
     /** Smart account that performs CREATE (ZeroDev kernel); bundler txs have no receipt.contractAddress */
     aaDeployerAddress?: Address;
