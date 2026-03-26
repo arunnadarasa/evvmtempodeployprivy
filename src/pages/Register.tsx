@@ -13,7 +13,10 @@ import { NetworkBadge } from '@/components/NetworkBadge';
 import { PrivyConnectButton } from '@/components/privy/PrivyConnectButton';
 import { useSepoliaRegistration } from '@/hooks/useSepoliaRegistration';
 import { getDeployments, type DeploymentRecord } from '@/lib/storage';
-import { EVVM_REGISTRY_SEPOLIA_ADDRESS } from '@/lib/evvmRegistry';
+import {
+  ENTRYPOINT_V07_SEPOLIA_ADDRESS,
+  EVVM_REGISTRY_SEPOLIA_ADDRESS,
+} from '@/lib/evvmRegistry';
 import { getExplorerUrl } from '@/lib/wagmi';
 
 function formatHash(value: string) {
@@ -139,7 +142,7 @@ export default function Register() {
         <div>
           <h1 className="text-lg font-bold">Register Tempo EVVM on Sepolia</h1>
           <p className="text-xs text-muted-foreground">
-            Use the Privy social wallet for auth on Sepolia, then let ZeroDev sponsor the registry write for your Tempo-hosted EVVM core before writing the assigned EVVM ID back into the Tempo core.
+            Use the Privy social wallet for auth on Sepolia, then let ZeroDev sponsor the AA bundle that executes `registerEvvm(...)` for your Tempo-hosted EVVM core before writing the assigned EVVM ID back into the Tempo core.
           </p>
         </div>
         <NetworkBadge chainId={sepolia.id} />
@@ -151,7 +154,7 @@ export default function Register() {
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">Sepolia Registration Flow</CardTitle>
               <CardDescription className="text-xs">
-                Step 1 writes a Tempo Testnet EVVM core address into the Sepolia registry. Step 2 writes the assigned EVVM ID back into that Tempo core with `setEvvmID(...)`.
+                Step 1 submits a Sepolia ERC-4337 EntryPoint transaction whose inner call executes `registerEvvm(...)` on the EVVM registry. Step 2 writes the assigned EVVM ID back into that Tempo core with `setEvvmID(...)`.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -165,6 +168,31 @@ export default function Register() {
                     </p>
                   </div>
                   {address && <CopyButton value={address} />}
+                </div>
+              </div>
+
+              <div className="rounded-md border border-border/80 bg-background/40 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <Label className="text-[10px] text-muted-foreground">Sepolia EntryPoint (ERC-4337)</Label>
+                    <p className="mt-1 text-xs font-mono break-all">{ENTRYPOINT_V07_SEPOLIA_ADDRESS}</p>
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      The top-level on-chain Sepolia tx lands here; `registerEvvm(...)` is executed inside that AA bundle.
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <CopyButton value={ENTRYPOINT_V07_SEPOLIA_ADDRESS} />
+                    <Button asChild type="button" variant="ghost" size="sm" className="h-7 w-7 p-0">
+                      <a
+                        href={getExplorerUrl(sepolia.id, ENTRYPOINT_V07_SEPOLIA_ADDRESS, 'address')}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Open EntryPoint"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    </Button>
+                  </div>
                 </div>
               </div>
 
@@ -280,7 +308,7 @@ export default function Register() {
                   </div>
                   <div className="mt-3 space-y-2 text-[11px]">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-muted-foreground">Registry Tx</span>
+                      <span className="text-muted-foreground">Sepolia EntryPoint Tx</span>
                       {lastResult.registerTxHash ? (
                         <a
                           href={getExplorerUrl(sepolia.id, lastResult.registerTxHash, 'tx')}
@@ -293,6 +321,17 @@ export default function Register() {
                       ) : (
                         <span className="text-muted-foreground">Already existed</span>
                       )}
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">EVVM Registry Contract</span>
+                      <a
+                        href={getExplorerUrl(sepolia.id, EVVM_REGISTRY_SEPOLIA_ADDRESS, 'address')}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-mono text-primary hover:underline"
+                      >
+                        {formatHash(EVVM_REGISTRY_SEPOLIA_ADDRESS)}
+                      </a>
                     </div>
                     {lastResult.setIdTxHash ? (
                       <div className="flex items-center justify-between gap-3">
@@ -307,6 +346,9 @@ export default function Register() {
                         </a>
                       </div>
                     ) : null}
+                    <p className="text-muted-foreground">
+                      The Sepolia registry write is executed inside the EntryPoint AA bundle, so there is one Sepolia on-chain tx hash and one EVVM registry contract context.
+                    </p>
                     {lastResult.matchedDeploymentIds?.length ? (
                       <p className="text-muted-foreground">
                         Local manifest updated. You can review it in the{' '}
@@ -375,7 +417,8 @@ export default function Register() {
             <CardContent className="space-y-2 text-xs text-muted-foreground">
               <p>Make sure the active Privy wallet is switched to Sepolia before pressing register.</p>
               <p>The core address should be the Tempo Testnet (Moderato) EVVM core you already deployed. This page does not deploy the core.</p>
-              <p>Registration is sponsored through ZeroDev on Sepolia, then the assigned EVVM ID is written back into the Tempo core from the funded Privy wallet.</p>
+              <p>Registration is sponsored through ZeroDev on Sepolia as an ERC-4337 EntryPoint transaction, and the inner call writes to the EVVM registry contract.</p>
+              <p>The assigned EVVM ID is then written back into the Tempo core from the funded Privy wallet on Tempo Testnet.</p>
               <Button asChild type="button" variant="outline" size="sm" className="mt-2 h-7 text-xs">
                 <Link to="/dashboard">
                   <RefreshCw className="h-3 w-3" />
