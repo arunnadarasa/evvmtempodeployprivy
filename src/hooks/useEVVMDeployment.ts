@@ -55,7 +55,8 @@ export function useEVVMDeployment() {
     !!embeddedWalletAddress &&
     !!publicClient &&
     hasBytecodes() &&
-    (useDirectTempoWalletFlow ? hasEmbeddedProvider : !!zerodevClient && !!zerodevAccount);
+    useDirectTempoWalletFlow &&
+    hasEmbeddedProvider;
 
   const deploy = useCallback(
     async (config: DeploymentConfig): Promise<DeploymentRecord | null> => {
